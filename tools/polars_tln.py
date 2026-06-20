@@ -2,12 +2,14 @@
 Polars TLN - Timeline generator based on polars
 
 Author: Gavin Hull
-Version: 0.1.0
+Version: 0.1.1
 
 This parses the files of the Analysis folder of Wiskess and creates CSV and json files 
 in a timeline that is between the start and end time specified on the CLI
 """
 
+import fileinput
+import glob
 import polars as pl
 from datetime import datetime, timedelta 
 import os
@@ -43,9 +45,7 @@ def get_hostname(dict_tln):
       if re.search(dict_tln['registry']['regex_file'], file):
         try:
           df = pl.scan_csv(os.path.join(dict_tln['registry']['file'],file))
-          host = df.select(
-            ["ValueName","ValueData"]
-            ).filter(
+          host = df.filter(
               pl.col("ValueName") == "ComputerName"
             ).select(
               pl.col("ValueData")
@@ -53,7 +53,7 @@ def get_hostname(dict_tln):
           host = host.collect()[0].item()
           return host
         except Exception as e:
-          print(f'Ran into an error when trying to get the hostname from the registry.')
+          print('Ran into an error when trying to get the hostname from the registry.')
           print('Error was:', e)
       else:
         print(f"Unable to get hostname from registry file: {file}")
@@ -63,8 +63,11 @@ def get_hostname(dict_tln):
     print("Getting hostname from hayabusa last line ", dict_tln['hayabusa']['file'])
     try:
       df = pl.scan_csv(os.path.join(dict_tln['hayabusa']['file']))
-      host = df.select(
-        ["Computer"]
+      host = df.filter(
+          (pl.col("Channel") == "Sec") &
+          (pl.col("EventID") == 4624)
+      ).select(
+          pl.col("Computer")
       )
       host = host.tail(1).collect().item().split('.')[0]
     except Exception as e:
@@ -74,9 +77,69 @@ def get_hostname(dict_tln):
   return "Unknown"
 
 
+
+
+def powershell_history_tln(out_filepath):
+    print('Timelining the PowerShell history files with the MFT')
+    # create a lazy frame lf for storing all the data
+    df = pl.DataFrame({})
+    mft_lf = pl.scan_csv(os.path.join(out_filepath,'FileSystem','MFTECmd.csv'))
+    # for each file in out_filepath\PSReadLine\*_ConsoleHost_history.txt:
+    powershell_path = os.path.join(out_filepath,'PSReadLine','*_ConsoleHost_history.txt')
+    for file in glob.glob(powershell_path):
+        if os.path.isfile(file):
+            # create a lazy frame lf
+            # get the username
+            username = os.path.basename(file).replace('_ConsoleHost_history.txt', '')
+            # creation_time, last_mod_time, accessed_time = find the timestamps in the out_filepath\FileSystem\MFTECmd.csv
+            creation_time, last_mod_time, accessed_time = mft_lf.filter(
+                (pl.col("FileName") == "ConsoleHost_history.txt") &
+                (pl.col("ParentPath")).str.contains(username)
+            ).select(
+                pl.col('Created0x10'),
+                pl.col('LastModified0x10'),
+                pl.col('LastAccess0x10')
+            ).collect()
+            # Get contents of _ConsoleHost_history
+            with open(file, 'r') as f:
+                lines = f.readlines()
+                first_line = lines[0].strip()
+                last_line = lines[-1].strip()
+            # create rows in the dataframe for creation, last mod and access
+            data_frame = pl.DataFrame({
+                'datetime' : [
+                    creation_time[0],
+                    last_mod_time[0],
+                    accessed_time[0]
+                ],
+                'timestamp_desc' : [
+                    f'PowerShell hist, user: {username} - creation time and first line',
+                    f'PowerShell hist, user: {username} - modified time and last line',
+                    f'PowerShell hist, user: {username} - accessed time and all lines - TIMESTAMP ONLY RELATED TO LAST LINE!'
+                ],
+                'message' : [
+                    first_line,
+                    last_line,
+                    ''.join(lines).replace('\n', '; ')
+                ]
+            })
+            df = pl.concat([df,data_frame])
+    
+    
+    # output the powershell timeline
+    if df.is_empty():
+        print('No powershell history in timeframe')
+    else:
+        # sort the timeline by datetime
+        df = df.sort('datetime')
+        df.write_csv(os.path.join(out_filepath, 'Timeline', 'powershell_history.csv'))
+        df.write_ndjson(os.path.join(out_filepath, 'Timeline', 'powershell_history.json'))
+
 def filter_tln(df, time_from, time_to):
+  # Add one day to time_to to include the entire end date (otherwise 2024-11-24 becomes 2024-11-24 00:00:00)
+  end_date = datetime.strptime(time_to, '%Y-%m-%d') + timedelta(days=1)
   filtered_range_df = df.filter(
-      pl.col('datetime').is_between(datetime.strptime(time_from, '%Y-%m-%d'), datetime.strptime(time_to, '%Y-%m-%d')),
+      pl.col('datetime').is_between(datetime.strptime(time_from, '%Y-%m-%d'), end_date),
   )
   return filtered_range_df
 
@@ -84,15 +147,16 @@ def filter_tln(df, time_from, time_to):
 def df_time(df, art, file, art_time, art_msg, fmt_time, host):
   # filename = file.split('\\')[-1]
   filename = os.path.basename(file)
-  # NOT working: remove duplicate header names that are used as aliases
-  # if 'message' in art_msg:
-  #   renamed = f'message_{art}'
-  #   df = df.rename({'message': 'renamed'})
-    # art_msg.append(renamed)
+  # remove duplicate header names that are used as aliases in the list art_msg
+  conflict_name = ['message','timestamp_desc','hostname']
+  for name in conflict_name:
+    if name in art_msg:
+      renamed = f'{name}_{art}'
+      df = df.rename({name: renamed})
+      # replace name with renamed in the list
+      art_msg = list(map(lambda x: x.replace(name, renamed), art_msg))
 
   art_tln = df.select([
-    # pl.col(art_time).alias('datetime').str.replace(r"(?:Z|\s*\+\d{2}.*)$","").str.strptime(pl.Datetime, format=fmt_time, strict=False).dt.cast_time_unit("ms"),
-    # pl.col(art_time).alias('datetime').str.replace(r"(?:Z|\s*\+\d{2}.*)$","").str.to_datetime(format=fmt_time).dt.cast_time_unit("ms"),
     pl.col(art_time).str.replace(r"(?:Z|\s*\+\d{2}.*)$","").str.to_datetime(format=fmt_time).alias('datetime'),
     pl.lit(f'{art} - {filename}: {art_time}').alias('timestamp_desc'),
     pl.concat_str(pl.col(art_msg).fill_null(pl.lit(""),), separator="; ").alias('message'),
@@ -141,13 +205,28 @@ def get_all_tln(dict_tln, time_from, time_to, host):
         if os.path.exists(file):
           print(file)
           try:
-            if re.search(r'psv$', file):
-              conv_file_to_utf8(file)
-              df = pl.scan_csv(file, separator='|')
+            if re.search(r'regripper', file):
+              # remove lines that aren't timestamped at start, ref: https://stackoverflow.com/a/17222971
+              matched = re.compile(r'^\d{9,11}\|.*').search
+              with fileinput.FileInput(file, inplace=1, backup='.bak') as reg_file:
+                for line in reg_file:
+                  if matched(line):
+                    print(line, end='')
+              df = pl.scan_csv(
+                file,
+                separator='|',
+                encoding='utf8-lossy',
+                truncate_ragged_lines=True,
+                new_columns=['time','source','system','user','description'],
+                schema_overrides={'time':str}
+              )
+            elif re.search(r'psv$', file):
+              # conv_file_to_utf8(file)
+              df = pl.scan_csv(file, separator='|', encoding='utf8-lossy', missing_utf8_is_empty_string=True, null_values='-')
             elif re.search(r'json(?:l|)$', file):
               df = pl.scan_ndjson(file)
             else:
-              df = pl.scan_csv(file, infer_schema_length=10000, null_values='-')
+              df = pl.scan_csv(file, encoding='utf8-lossy', infer_schema_length=10000, null_values='-')
           except:
             df = pl.scan_csv(file, ignore_errors=True)
           file_tln = get_art_tln(df, art, file, dict_tln, time_from, time_to, host)
@@ -162,6 +241,14 @@ def get_all_tln(dict_tln, time_from, time_to, host):
     if len(files_tln) > 0:
       # Sort the whole timeline by datetime
       files_tln = files_tln.sort('datetime')
+      # Format datetime to Opensearch format
+      files_tln = files_tln.with_columns(
+        pl.col("datetime").dt.strftime("%Y-%m-%dT%H:%M:%S.%3fZ")
+      )
+      # Add a timestamp column in milliseconds
+      files_tln = files_tln.with_columns(
+        (pl.col("datetime").str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%S.%3fZ").dt.timestamp("ms")).alias("timestamp")
+      )  
       files_tln.write_csv(dict_tln[art]['out'])
       json_outfile = f'{os.path.splitext(dict_tln[art]["out"])[0]}.json'
       files_tln.write_ndjson(json_outfile)
@@ -175,11 +262,19 @@ def get_all_tln(dict_tln, time_from, time_to, host):
 def csv_to_tln(out_filepath, time_from, time_to):
   # dict_tln needs the file, out, msg, times and fmt_time. If the file is a dir, the regex_file is needed to match the file name
   dict_tln = {
+    'registry': {
+      'regex_file': r'reg-(?:System|User)\.csv$',
+      'file': os.path.join(*[f'{out_filepath}','Registry']),
+      'out': os.path.join(*[f'{out_filepath}','Timeline','registry.csv']),
+      'msg': ['Description','Category','ValueName','ValueData','ValueData2','ValueData3','Comment','HivePath'],
+      'times': ['LastWriteTimestamp'],
+      'fmt_time': '%F %T%.f'
+    },
     'amcache': {
       'regex_file': r'(?:Amcache_UnassociatedFileEntries)\.csv$',
       'file': os.path.join(*[f'{out_filepath}','FileExecution']),
       'out': os.path.join(*[f'{out_filepath}','Timeline','amcache.csv']),
-      'msg': ['SHA1','FullPath','FileExtension','ProductName'],
+      'msg': ['FullPath','ProductName','SHA1','FileExtension'],
       'times': ['FileKeyLastWriteTimestamp','FileIDLastWriteTimestamp'],
       'fmt_time': '%F %T'
     },
@@ -193,7 +288,7 @@ def csv_to_tln(out_filepath, time_from, time_to):
     'appcompatcache': {
       'file': os.path.join(*[f'{out_filepath}','FileExecution','appcompatcache.csv']),
       'out': os.path.join(*[f'{out_filepath}','Timeline','appcompatcache.csv']),
-      'msg': ['ControlSet','CacheEntryPosition','Path','Executed','Duplicate','SourceFile'],
+      'msg': ['Path','Executed','Duplicate','SourceFile','ControlSet','CacheEntryPosition'],
       'times': ['LastModifiedTimeUTC'],
       'fmt_time': '%F %T'
     },
@@ -205,26 +300,41 @@ def csv_to_tln(out_filepath, time_from, time_to):
       'fmt_time': '%F %T'
     },
     'network_sum': {
-      'regex_file': r'(?:SumECmd_DETAIL_ClientsDetailed_Output)\.csv$',
+      'regex_file': r'(?:SumECmd_DETAIL_Clients_Output)\.csv$',
       'file': os.path.join(*[f'{out_filepath}','Network']),
       'out': os.path.join(*[f'{out_filepath}','Timeline','network.csv']),
-      'msg': ['Count','DayNumber','RoleGuid','RoleDescription','AuthenticatedUserName','TotalAccesses','IpAddress','ClientName','TenantId','SourceFile'],
+      'msg': ['RoleDescription','TotalAccesses','AuthenticatedUserName','IpAddress','ClientName','RoleGuid','TenantId','SourceFile'],
       'times': ['InsertDate','LastAccess'],
       'fmt_time': '%F %T'
     },
-    'browser-hist': {
-      # TODO: resolve parsing error of none utf-8
+    'network_sum_kstrike': {
+      'file': os.path.join(*[f'{out_filepath}','Network','UAL_Kstrike.psv']),
+      'out': os.path.join(*[f'{out_filepath}','Timeline','network-kstrike.csv']),
+      'msg': ['AuthenticatedUserName','ConvertedAddress (Correlated_HostName(s))','TotalAccesses','RoleGuid (RoleName)','DatesAndAccesses','RawAddress'],
+      'times': ['InsertDate','LastAccess'],
+      'fmt_time': '%F %T%.f'
+    },
+    'browser-hist_uk': {
+      # for browsing history processed on machines with timestamps in UK format
       'file': os.path.join(*[f'{out_filepath}','Network','BrowsingHistory.csv']),
       'out': os.path.join(*[f'{out_filepath}','Timeline','browser-hist.csv']),
       'msg': ['URL','Title','Visited From','Visit Type','Web Browser','User Profile'],
       'times': ['Visit Time'],
       'fmt_time': '%d/%m/%Y %T'
     },
+    'browser-hist_us': { 
+      # for browsing history processed on machines with timestamps in US format
+      'file': os.path.join(*[f'{out_filepath}','Network','BrowsingHistory.csv']),
+      'out': os.path.join(*[f'{out_filepath}','Timeline','browser-hist.csv']),
+      'msg': ['URL','Title','Visited From','Visit Type','Web Browser','User Profile'],
+      'times': ['Visit Time'],
+      'fmt_time': '%m/%d/%Y %r'
+    },
     'shellbags': {
       'regex_file': r'(?:UsrClass|NTUSER)\.csv$',
       'file': os.path.join(*[f'{out_filepath}','UserActivity']),
       'out': os.path.join(*[f'{out_filepath}','Timeline','shellbags.csv']),
-      'msg': ['AbsolutePath','ShellType','Value'],
+      'msg': ['AbsolutePath','Username','ShellType','Value'],
       'times': ['CreatedOn','ModifiedOn','AccessedOn','LastWriteTime','FirstInteracted','LastInteracted'],
       'fmt_time': '%F %T'
     },
@@ -232,22 +342,14 @@ def csv_to_tln(out_filepath, time_from, time_to):
       'regex_file': r'(?:AutomaticDestinations|CustomDestinations)\.csv$',
       'file': os.path.join(*[f'{out_filepath}','UserActivity']),
       'out': os.path.join(*[f'{out_filepath}','Timeline','jump-lists.csv']),
-      'msg': ['SourceFile','AppIdDescription','MachineID','LocalPath','CommonPath','TargetIDAbsolutePath','FileSize','Arguments'],
+      'msg': ['LocalPath','CommonPath','TargetIDAbsolutePath','FileSize','AppIdDescription','Arguments','MachineID','SourceFile'],
       'times': ['SourceCreated','SourceModified','SourceAccessed','TargetCreated','TargetModified','TargetAccessed','TrackerCreatedOn'],
       'fmt_time': '%F %T'
-    },
-    'registry': {
-      'regex_file': r'reg-(?:System|User)\.csv$',
-      'file': os.path.join(*[f'{out_filepath}','Registry']),
-      'out': os.path.join(*[f'{out_filepath}','Timeline','registry.csv']),
-      'msg': ['HivePath','Description','Category','ValueName','ValueData','ValueData2','ValueData3','Comment'],
-      'times': ['LastWriteTimestamp'],
-      'fmt_time': '%F %T%.f'
     },
     'lnk-files': {
       'file': os.path.join(*[f'{out_filepath}','FileSystem','lnk-files.csv']),
       'out': os.path.join(*[f'{out_filepath}','Timeline','lnk-files.csv']),
-      'msg': ['SourceFile','FileSize','RelativePath','WorkingDirectory','LocalPath','NetworkPath','CommonPath','Arguments','MachineID'],
+      'msg': ['RelativePath','WorkingDirectory','LocalPath','NetworkPath','CommonPath','FileSize','Arguments','MachineID','SourceFile'],
       'times': ['SourceCreated','SourceModified','SourceAccessed','TargetCreated','TargetModified','TargetAccessed','TrackerCreatedOn'],
       'fmt_time': '%F %T'
     },
@@ -259,18 +361,49 @@ def csv_to_tln(out_filepath, time_from, time_to):
       'times': ['DeletedOn'],
       'fmt_time': '%F %T'
     },
+    'hindsight': {
+      'file': os.path.join(*[f'{out_filepath}','Network','hindsight.jsonl']),
+      'out': os.path.join(*[f'{out_filepath}','Timeline','hindsight.csv']),
+      'msg': ['url','timestamp_desc','message','value','interpretation','data_type','source_long','profile'],
+      'times': ['datetime'],
+      'fmt_time': '%FT%T%.f'
+    },
+    'regripper_exe': {
+      'file': os.path.join(*[f'{out_filepath}','FileExecution','regripper_amcache.psv']),
+      'out': os.path.join(*[f'{out_filepath}','Timeline','regripper_amcache.csv']),
+      'msg': ['source','system','user','description'],
+      'times': ['time'],
+      'fmt_time': '%s'
+    },
+    'regripper_reg': {
+      'regex_file': r'^regripper.*\.psv$',
+      'file': os.path.join(*[f'{out_filepath}','Registry','regripper_tln']),
+      'out': os.path.join(*[f'{out_filepath}','Timeline','regripper.csv']),
+      'msg': ['source','system','user','description'],
+      'times': ['time'],
+      'fmt_time': '%s'
+    },
+    'srum_net_usages': {
+      'regex_file': r'_SrumECmd_NetworkUsages_Output\.csv$',
+      'file': os.path.join(*[f'{out_filepath}','Network']),
+      'out': os.path.join(*[f'{out_filepath}','Timeline','srum_net_usages.csv']),
+      'msg': ['ExeInfo','ExeInfoDescription','ExeTimestamp','SidType','Sid','UserName','UserId','AppId','BytesReceived','BytesSent','InterfaceLuid','InterfaceType','L2ProfileFlags','L2ProfileId','ProfileName'],
+      'times': ['Timestamp'],
+      'fmt_time': '%F %X'
+    },
+    'srum_app_resusages': {
+      'regex_file': r'_SrumECmd_AppResourceUseInfo_Output\.csv$',
+      'file': os.path.join(*[f'{out_filepath}','Network']),
+      'out': os.path.join(*[f'{out_filepath}','Timeline','srum_app_resusages.csv']),
+      'msg': ['ExeInfo','ExeInfoDescription','ExeTimestamp','SidType','Sid','UserName','UserId','AppId','BackgroundBytesRead','BackgroundBytesWritten','BackgroundContextSwitches','BackgroundCycleTime','BackgroundNumberOfFlushes','BackgroundNumReadOperations','BackgroundNumWriteOperations','FaceTime','ForegroundBytesRead','ForegroundBytesWritten','ForegroundContextSwitches','ForegroundCycleTime','ForegroundNumberOfFlushes','ForegroundNumReadOperations','ForegroundNumWriteOperations'],
+      'times': ['Timestamp'],
+      'fmt_time': '%F %X'
+    },
     'mft':{
       'file': os.path.join(*[f'{out_filepath}','FileSystem','MFTECmd.csv']),
       'out': os.path.join(*[f'{out_filepath}','Timeline','MFTECmd.csv']),
       'msg':['ParentPath','FileName','Extension','FileSize'],
       'times':['Created0x10','Created0x30','LastModified0x10','LastModified0x30','LastRecordChange0x10','LastRecordChange0x30','LastAccess0x10','LastAccess0x30'],
-      'fmt_time': '%F %T%.f'
-    },
-    'event-logs': {
-      'file': os.path.join(*[f'{out_filepath}','EventLogs','EvtxECmd-All.csv']),
-      'out': os.path.join(*[f'{out_filepath}','Timeline','event-logs.csv']),
-      'msg': ['EventId','Level','Provider','Channel','Computer','UserId','MapDescription','UserName','RemoteHost','Payload'],
-      'times': ['TimeCreated'],
       'fmt_time': '%F %T%.f'
     },
     'usnjrnl-j':{
@@ -279,13 +412,6 @@ def csv_to_tln(out_filepath, time_from, time_to):
       'msg': ['Name','Extension','EntryNumber','ParentEntryNumber','ParentPath','UpdateReasons','FileAttributes'],
       'times': ['UpdateTimestamp'],
       'fmt_time': '%F %T%.f'
-    },
-    'hayabusa': {
-      'file': os.path.join(*[f'{out_filepath}','EventLogs','hayabusa.csv']),
-      'out': os.path.join(*[f'{out_filepath}','Timeline','hayabusa.csv']),
-      'msg': ['Computer','Channel','EventID','Level','MitreTactics','MitreTags','OtherTags','RecordID','Details','ExtraFieldInfo','RuleFile','EvtxFile'],
-      'times': ['datetime'],
-      'fmt_time': '%FT%T%.f'
     },
     'rusty_usnjrnl': {
       'file': os.path.join(*[f'{out_filepath}','FileSystem','usnjrnl_j.json']),
@@ -300,10 +426,21 @@ def csv_to_tln(out_filepath, time_from, time_to):
       'msg': ['FullPath','TotalEntrySize','FileSize','StandardInfoFlags','FileNameFlags','IsADirectory','IsDeleted','HasAlternateDataStreams'],
       'times': ['StandardInfoLastModified','StandardInfoLastAccess','StandardInfoCreated','FileNameLastModified','FileNameLastAccess','FileNameCreated'],
       'fmt_time': '%FT%T%.f'
+    },
+    'hayabusa': {
+      'file': os.path.join(*[f'{out_filepath}','EventLogs','hayabusa.csv']),
+      'out': os.path.join(*[f'{out_filepath}','Timeline','hayabusa.csv']),
+      'msg': ['message','Channel','EventID','Level','MitreTactics','MitreTags','Details','ExtraFieldInfo','RuleFile','Computer','OtherTags','RecordID','EvtxFile','timestamp_desc'],
+      'times': ['datetime'],
+      'fmt_time': '%FT%T%.f'
+    },
+    'event-logs': {
+      'file': os.path.join(*[f'{out_filepath}','EventLogs','EvtxECmd-All.csv']),
+      'out': os.path.join(*[f'{out_filepath}','Timeline','event-logs.csv']),
+      'msg': ['EventId','MapDescription','UserId','UserName','RemoteHost','Level','Provider','Channel','Computer','Payload'],
+      'times': ['TimeCreated'],
+      'fmt_time': '%F %T%.f'
     }
-
-    # # TODO: FileExecution
-    # # TODO: Network
   }
 
   host = get_hostname(dict_tln)
@@ -329,6 +466,8 @@ def main():
   args = parser.parse_args()
 
   csv_to_tln(args.out_filepath, args.time_from, args.time_to)
+    
+  powershell_history_tln(args.out_filepath)
 
 if __name__ == '__main__':
   main()

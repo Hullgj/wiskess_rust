@@ -1,6 +1,9 @@
 pub mod config {
-  use indicatif::MultiProgress;
+  use std::path::PathBuf;
+
+use indicatif::MultiProgress;
 use serde::{Deserialize, Serialize};
+use struct_iterable::Iterable;
 
   /// Top level structure of config file
   #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -66,16 +69,17 @@ use serde::{Deserialize, Serialize};
   }
 
   // Set struct for interal args
-  #[derive(Debug, Clone)]
+  #[derive(Debug, Clone, Iterable)]
   pub struct MainArgs {
       pub out_path: String,
       pub start_date: String,
       pub end_date: String,
-      pub tool_path: String,
+      pub tool_path: PathBuf,
       pub ioc_file: String,
       pub silent: bool,
-      pub out_log: String,
-      pub multi_pb: MultiProgress
+      pub out_log: PathBuf,
+      pub multi_pb: MultiProgress,
+      pub collect: bool
   }
 
   // Set struct for setup args
@@ -87,10 +91,10 @@ use serde::{Deserialize, Serialize};
   }
 
   // Set struct for whipped args
-  #[derive(Debug, Serialize, Deserialize, Clone)]
+  #[derive(Debug, Serialize, Deserialize, Clone, Iterable)]
   pub struct WhippedArgs {
-    pub config: String,
-    pub artefacts_config: String,
+    pub config: PathBuf,
+    pub artefacts_config: PathBuf,
     pub data_source_list: String,
     pub local_storage: String,
     pub start_date: String,
@@ -101,4 +105,21 @@ use serde::{Deserialize, Serialize};
     pub update: bool,
     pub keep_evidence: bool
   }
+
+  // Set struct for whipped image args
+  #[derive(Debug, Serialize, Deserialize, Clone, Iterable)]
+  pub struct WhippedImageArgs {
+    pub tool_path: PathBuf,
+    pub config: PathBuf,
+    pub start_date: String,
+    pub end_date: String,
+    pub ioc_file: String,
+    pub image_path: PathBuf,
+    pub wiskess_folder: String,
+    pub update: bool,
+    pub keep_evidence: bool
+  }
 }
+
+
+

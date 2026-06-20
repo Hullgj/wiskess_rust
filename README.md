@@ -1,19 +1,83 @@
 # wiskess_rust
+Wiskess automates the Windows evidence processing for incident response and forensic investigations. The overall goal of the tool is to process evidence in the form of logical or physcial collections, i.e. a velociraptor collection or a disk image, then upload the results to Azure or AWS storage. 
 
-![271793948-27e9b4b3-0a7f-4efb-a844-2eda7a8a6385](https://github.com/vividDuck/wiskess_rust/assets/122105925/46cacffc-a0d0-4ec7-b1cb-60bca314d2bb)
+Wiskess automates the processing of disk images and triage collection artefacts from Windows systems. It does this with a pipeline involving six steps:
 
-WISKESS automates the Windows evidence processing for Incident Response investigations. Rust version is a program that has been developed with enhanced parallel processing and reliability.
+1. Get the data – transfers data from cloud-based storage (i.e. AWS S3, Azure Storage), network drive, etc.
+2. Pre-process the data – structures the data into a suitable format for processing
+3. Process the data – covers the main artefacts of Windows system with parallel processing
+4. Enrich the findings – scans the data and findings with IOCs, yara rules and threat intel feeds
+5. Generate reports – timelines all results of the processing in a format compatible with visualisation tools (Elastic, Splunk, Timesketch)
+6. Store the results – results can be uploaded to cloud-based storage
 
-This is the Rust version of WISKESS, which uses parallel processing of multiple tools including Hayabusa, Chainsaw, EZ-Tools, Loki, SCCM Recently Used, WMI Persistence, python-cim, Browsing History, Hindsight, ripgrep, velociraptor, and more can be added. 
+# The way of Wiskess
+![Alt text](web/static/S-RM-IR-Wiskess-Graphics3.webp)
 
-It includes enrichment tools that scan the data source using your IOC list, yara rules, and open source intelligence. 
+# Tools integrated to Wiskess
+This is the Rust version of Wiskess, which uses parallel processing of multiple tools and more can be added. It includes enrichment tools that scan the data source using your IOC list, yara rules, and open source intelligence. 
 
 The results are structured into folders in CSV files that can be opened with text editors and searched across using tools like grep. The tool produces a report of the system info and files that have produced results in the Analysis folder.
 
 The output is generated into reports of a timeline that is compatible with ingesting into visualisation tools including, timesketch, elastic and splunk.
 
+The list of tools used after setup are:
 
-# Whipped by WISKESS `wiskess_rust.exe whipped`
+| Developer/Organization      | Tools                                                      |
+|-----------------------------|------------------------------------------------------------|
+| ANSSI-FR                    | bmc_tools                                                  |
+| Nir Soft                    | BrowsingHistoryView                                        |
+| Yamato-Security             | hayabusa                                                   |
+| obsidianforensics           | hindsight                                                  |
+| brimorlabs                  | KStrike                                                    |
+| Neo23x0                     | loki                                                       |
+| BurntSushi                  | RipGrep                                                    |
+| keydet89                    | RegRipper                                                  |
+| williballenthin             | shellbags                                                  |
+| davidpany                   | CCM_RUA_Finder, PyWMIPersistenceFinder                     |
+| omerbenamram                | evtx, mft                                                  |
+| WithSecureLabs chainsaw     | evtx, Shimcache, SRUM (System Resource Usage Monitor)      |
+| EZTools                     | AmcacheParser, AppCompatCacheParser, EvtxECmd, JLECmd, LECmd, MFTECmd, PECmd, RBCmd, RecentFileCacheParser, RECmd, SBECmd, SrumECmd, SumECmd |
+| S-RM                        | polars_hostinfo.py, polars_tln.py, Executablelist.ps1      |
+| Whipped Tools               | AzCopy, 7zip, OSFMount                                     |
+
+
+![271793948-27e9b4b3-0a7f-4efb-a844-2eda7a8a6385](https://github.com/vividDuck/wiskess_rust/assets/122105925/46cacffc-a0d0-4ec7-b1cb-60bca314d2bb)
+
+# Requirements
+run `wiskess_rust.exe setup -g <your github token>` using a terminal with Administrator rights. 
+
+The github token needs the minimum permissions to access public github repos. GitHub's guide is here: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token
+
+The setup will install tools needed by WISKESS on the operating system and under the tools folder. You will need about 5 GB of disk space for the installation to complete.
+
+You can check if setup has completed successfully with the command: `wiskess_rust.exe setup -c`
+
+# Wiskess Web UI `wiskess_rust.exe gui`
+This command will launch the Web user interface. This is still WIP, where currently you can submit two commands to wiskess, including:
+* a single data source - using the main wiskess module
+* multiple data sources hosted locally, or in the cloud (Azure storage or AWS S3) - using the whipped module
+
+![image](https://github.com/user-attachments/assets/014a0d99-4625-4b79-b033-54156256ff8a)
+
+![image](https://github.com/user-attachments/assets/e4f04d25-a5c0-456b-93ad-b3229b8d0f03)
+
+
+I intend to extend the functionality of the GUI to see the current progress and a view of the processed files and folder. Until then, please review the progress in from the terminal that you launched the Web UI, and review the processed data in either explorer, VSCode or tool of your choice.
+
+# Process configurations
+There are multiple configurations that can be used to process data. The default one 'config/main_win.yaml' is designed for use on Windows OS. This includes most of the commonly used process tools of wiskess. If you need a more thorough investigation, and don't mind waiting a bit longer for the processing to complete use `config/intense_win.yaml`. The intense config includes these tools:
+* Chainsaw EVTX
+* EVTX Dump
+* williballenthin Shellbags
+* KStrike
+* RDP Bitmap
+* IOCs over pagefile
+* Executablelist
+* Loki over the datasource
+
+You can set the process config using the argument `--config my_fav_tools.yaml` in both wiskess and whipped by wiskess commands.
+
+# Whipped by Wiskess `wiskess_rust.exe whipped`
 This command will pull data from an AWS or Azure store, process it with wiskess and upload the output to a store.
 
 ## Usage
@@ -32,17 +96,25 @@ This can be used to process Windows data sources stored on either an Azure or AW
 * Copy the file path of all the data you need processed, this needs to be from the folder or bucket that you got the s3:// link.     
 * Set a start and end time, which is likely the incident timeframe
 
-## Example
+## Example - wiskess all the evidence in the in-link and upload the data to the out-link
 ```
-wiskess_rust.exe whipped --config ./config/win_all.yml
-        --data-source-list "image.vmdk, folder with collection, surge.zip, velociraptor_collection.7z" `
-        --local-storage x:
-        --storage-type azure
+wiskess_rust.exe whipped `
+        --local-storage x:\ `
         --in-link "https://myaccount.file.core.windows.net/myclient/?sp=rl&st=...VWjgWTY8uc%3D&sr=s" `
         --out-link "https://myaccount.file.core.windows.net/internal-cache/myclient/?sp=rcwl&st=2023-04-21T20...2FZWEA%3D&sr=s" `
         --start-date 2023-01-01 `
+        --end-date 2023-02-01
+```
+## Example - wiskess the collections stored locally on X:\my-collections and upload the results to azure storage
+```
+wiskess_rust.exe whipped `
+        --data-source-list "image.vmdk, folder with collection, surge.zip, velociraptor_collection.7z" `
+        --local-storage x:\my-collections `
+        --in-link local `
+        --out-link "https://myaccount.file.core.windows.net/internal-cache/myclient/?sp=rcwl&st=2023-04-21T20...2FZWEA%3D&sr=s" `
+        --start-date 2023-01-01 `
         --end-date 2023-02-01 `
-        --ioc-file ./iocs.txt
+        --update
 ```
 
 ## Parameters
@@ -57,9 +129,6 @@ wiskess_rust.exe whipped --config ./config/win_all.yml
 
     --local-storage <String>
         Required. The path to where the data is temporarily downloaded to and Wiskess output is stored locally
-
-    --storage-type <String>
-        Requried. Either 'azure' or 'aws' - based on where the data source is stored.
 
     --in-link <String>
         Required. The link that the data is stored on, i.e.
@@ -87,11 +156,8 @@ wiskess_rust.exe whipped --config ./config/win_all.yml
         Caution: make sure you have enough disk space for all the data source list.
 </details>
     
-# WISKESS `wiskess_rust.exe wiskess`
-This is the Rust version of WISKESS, which uses parallel processing of multiple processors, enriches the data and creates reports. It is invoked by the command `wiskess_rust.exe whipped`, but can also be used independently with the command `wiskess_rust.exe wiskess`.
-
-## Requirements
-run `wiskess_rust.exe setup` using PowerShell as Administrator
+# Wiskess `wiskess_rust.exe wiskess`
+This is the Rust version of Wiskess, which uses parallel processing of multiple processors, enriches the data and creates reports. It is invoked by the command `wiskess_rust.exe whipped`, but can also be used independently with the command `wiskess_rust.exe wiskess`.
 
 ## Usage
 * Mount the image to a drive, i.e. using Arsenal Image Mounter. Can be skipped if using a folder of artefacts.
@@ -105,7 +171,7 @@ run `wiskess_rust.exe setup` using PowerShell as Administrator
     <summary>Click to show the parameters for `wiskess_rust.exe wiskess`</summary>
         
     --config <String>
-        Optional. The paths to the configuration file, i.e. ./config/win_all.yml
+        Optional. The paths to the configuration file. Default: ./config/main_win.yml
             
     --data-source <String>
         Required. The drive letter the image is mounted on, or the file path to the extracted collection.
@@ -131,6 +197,41 @@ run `wiskess_rust.exe setup` using PowerShell as Administrator
 
 Minimum arguments required to collect artefacts from E:, with a quick triage of the last 7 days and storing results to Z:\Project file path. And provide a list of indicators in a file path.
 ```
-    ./wiskess_rust.exe wiskess --config ./config/all_win.yml --data-source E: -out-path "Z:\Project" --start-date 2023-01-01 --end-date 2023-02-01 --ioc-file ./iocs.txt
+    ./wiskess_rust.exe wiskess --data-source E: -out-path "Z:\Project" --start-date 2023-01-01 --end-date 2023-02-01 --ioc-file ./iocs.txt
 
 ```
+
+# TODO
+
+The WISKESS project has several areas of development including bug fixes, performance enhancements and capability improvements. Here's a short list of those for your understanding of the known issues, potential and roadmap.
+
+## Known Issues
+The following are known issues that are being worked on for the next release:
+* No timeout for processes. Some of the wiskess processes may not ever stop, which prevents the pipeline (whipped) from moving on. To resolve this manually, find the name of the process (not wiskess_rust.exe) i.e. in TaskMan or resmon.exe and kill it. Such as SumECmd running for >30 mins, find SumECmd.exe and terminate the process.
+* IOC summary CSV has extra lines, isn't formatted correctly
+* Linux version of wiskess is missing processors for prefetch and srum, as SrumECmd is incompatible and chainsaw srum is unreliable. WIP: implement srum_dump that is compatible on linux
+
+## Feature requests
+This list includes proposed improvements to wiskess:
+* Additional fields added to timeline, i.e. username from profile file path in registry, jump-lists and lnk-files
+* Timeline output of iis logs, AV logs
+* Timelined output of DNS logs of the Microsoft UAL logs, which allow a look up of the IP address mapped to a hostname
+* timeline of srum-dump.exe output which is XLSX format
+
+## Performance enhancements
+There are several areas where WISKESS can improve in terms of speed, usability and interoperability. These requests are listed here:
+* Auto-update from the latest release
+* Storing the github token in a config file
+* integrate whipped_imageprocess.ps1 to rust whipped
+* Move of files from collection or image is done in parallel
+
+## Completed developments for next release
+The following are a list of developments since the last release and are currently pushed to the repo:
+* Official support for processing local collections or disk images, where multiple collections or images have been downloaded to a drive or network share. There is no new command for this, when you have already downloaded the collections/images you provide the `--in-link` with the word "local" and provide the local path `-l` as the folder where the collections are stored on disk and the `--data-source-list`, `-d` as the list of files to process, i.e. `--in-link local -l x:\ -d "Collection-DC1.zip, Collection-FTP.zip, Veeam.vmdk`. You can optionally provide the `--out-link` as "local", but you must combine that with the `--update` flag.
+* Timeline file for host information file - useful when only ingesting the timeline folder files into a SIEM
+* Timeline file for PowerShell history files, ConsoleHost_history.txt
+* Tests to confirm the WISKESS has been setup, and reporting any missing packages. Use the command `setup -c` to check if the setup completed completely. 
+* Removed bloat-data in the message field of some timeline files, i.e. shellbags, hayabusa, and restructured others so the message field is easier to read in a CSV.
+* Fixed an issue in the network CSV in timeline, where multiple entries were shown for the same event
+* Fixed an issue with old-whip and GUI when using whipped, where some collections would not be extracted completely
+* artefact collection from disk images on Windows are now done in parallel

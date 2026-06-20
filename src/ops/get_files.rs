@@ -14,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::structured_values::{NtfsFileName, NtfsFileNamespace};
 use ntfs::{Ntfs, NtfsFile, NtfsReadSeek};
-use regex::Regex;
+use regex::{RegexBuilder};
 use sector_reader::SectorReader;
 
 struct CommandInfo<'n, T>
@@ -85,7 +85,10 @@ pub fn get_file(filesystem: &String, filepath: &String, dest_path: &str, is_file
     } else {
         let dest_p = dest_parent.as_os_str().to_str().unwrap();
         let file_list = get_file_list(&mut info, dest_p);
-        let re = Regex::new(r"\.evtx$").unwrap();
+        let re = RegexBuilder::new(r"\.(?:evtx|LOG1|LOG2|regtrans-ms|blf|LOG|mdb|log)$")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
         let mut num_matches: u32 = 0;
         for file in file_list {
             if re.is_match(&file) {
@@ -285,7 +288,7 @@ where
         let maybe_entry = NtfsFileNameIndex::find(&mut finder, info.ntfs, &mut info.fs, arg);
 
         if maybe_entry.is_none() {
-            println!("Cannot find subdirectory \"{arg}\".");
+            // println!("Cannot find subdirectory \"{arg}\".");
             return Ok(());
         }
 
@@ -295,7 +298,7 @@ where
             .expect("key must exist for a found Index Entry")?;
 
         if !file_name.is_directory() {
-            println!("\"{arg}\" is not a directory.");
+            // println!("\"{arg}\" is not a directory.");
             return Ok(());
         }
 

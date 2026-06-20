@@ -1,5 +1,6 @@
 import requests
 import urllib.request
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 import zipfile
 import argparse
@@ -9,34 +10,53 @@ import filetype
 import re
 import shutil
 import magic
+from time import sleep
 
-def get_files(response: str, target_dir: str):
+
+def get_files(response: str, target_dir: str, backoff=1, max_retries=3):
   # download each url, and extract, then delete the zip
   for url in response.json()['assets']:
-    print(url['browser_download_url'])
-    filename = url['name']
-    urllib.request.urlretrieve(url['browser_download_url'], filename)
-    if os.path.exists(filename):
-      file_type = filetype.guess(filename)
-      if file_type is None:
-        print(f'[!] No file type known for file: {filename}')
+    try: 
+      print(url['browser_download_url'])
+      filename = url['name']
+      urllib.request.urlretrieve(url['browser_download_url'], filename)
+      if os.path.exists(filename):
+        file_type = filetype.guess(filename)
+        if file_type is None:
+          print(f'[!] No file type known for file: {filename}')
+          os.remove(filename)
+          continue
+        elif file_type.mime == 'application/zip':
+          # extract it
+          with zipfile.ZipFile(filename, 'r') as zip_ref:
+            zip_ref.extractall(target_dir)
+        elif file_type.mime == 'application/gzip':
+          # extract it
+          shutil.unpack_archive(filename, target_dir)
+        elif file_type.mime in ('application/x-msdownload', 'application/x-executable', 'x-pie-executable', 'x-dos-executable', 'x-dosexec', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'):
+          shutil.copy(filename, target_dir)
+        else:
+          print(f'[!] Unable to extract release {filename} archive with mime type: {file_type.mime}')
+        # delete the zip
         os.remove(filename)
-        continue
-      elif file_type.mime == 'application/zip':
-        # extract it
-        with zipfile.ZipFile(filename, 'r') as zip_ref:
-          zip_ref.extractall(target_dir)
-      elif file_type.mime == 'application/gzip':
-        # extract it
-        shutil.unpack_archive(filename, target_dir)
-      elif file_type.mime in ('application/x-msdownload', 'application/x-executable', 'x-pie-executable', 'x-dos-executable', 'x-dosexec'):
-        shutil.copy(filename, target_dir)
       else:
-        print(f'[!] Unable to extract release {filename} archive with mime type: {file_type.mime}')
-      # delete the zip
-      os.remove(filename)
-    else:
-      print(f'[!] File {filename} didn\'t download to the filepath.')
+        print(f'[!] File {filename} didn\'t download to the filepath.')
+    except HTTPError as e:
+      if e.code == 504:
+        print(f'[!] HTTP 504 Error downloading files, back off and retry: {e.code} - {e.reason}')
+        if backoff <= max_retries:
+          backoff += 1
+          sleep(backoff * 5)
+          try:
+            urllib.request.urlretrieve(url['browser_download_url'], filename, bacjkoff=backoff)
+          except HTTPError as e:
+            print(f'[!] HTTPError downloading files on retry: {e.code} - {e.reason}')
+            print(f'[!] URL: {url["browser_download_url"]}')
+            raise 
+    except Exception as e:
+      print(f'[!] Exception downloading files: {e}')
+      print(f'[!] URL: {url["browser_download_url"]}')
+      raise
 
 
 def make_symlink(target_dir: str, program: str, script_os: str):
@@ -46,14 +66,15 @@ def make_symlink(target_dir: str, program: str, script_os: str):
     if os.path.islink(target_file):
       os.unlink(target_file)
     else:
+      print(f'[!] Target file already exists and is not a symlink, so not creating link.')
       return
 
   if script_os == 'windows':
     file_type_regex = re.compile('x-(?:dos-executable|dosexec|msdownload)')
-    file_mime_regex = re.compile('PE32\+ executable \(console\) x86-64, for MS Windows')
+    file_mime_regex = re.compile('PE32\\+ executable \\(console\\) x86-64, for MS Windows')
   elif script_os == 'linux':
-    file_type_regex = re.compile('x(?:-pie|)-executable')
-    file_mime_regex = re.compile('ELF 64-bit LSB shared object, x86-64')
+    file_type_regex = re.compile('x(?:-pie|)-executable|application/x-sharedlib')
+    file_mime_regex = re.compile('ELF 64-bit LSB (shared object|pie executable), x86-64')
   else:
     file_type_regex = re.compile('(?:application|x-.*-exec)')
     file_mime_regex = re.compile('x86-64')
@@ -66,22 +87,24 @@ def make_symlink(target_dir: str, program: str, script_os: str):
         file_type = magic.from_file(f_path, mime=True)
         file_mime = magic.from_file(f_path)
         if file_type_regex.search(file_type) and file_mime_regex.search(file_mime):
-          print(f'[+] Creating link for: {f_path}, with type: {file_type}')
+          print(f'[+] Creating link for: {f_path}, with type: {file_type}. Target file: {target_file}')
           source_file = f_path
           break
   if source_file != '' and source_file != target_file:
     os.symlink(source_file, target_file)
     # make the source executable
     sf_stats = os.stat(source_file)
-    os.chmod(source_file, sf_stats.st_mode | stat.S_IEXEC)
+    os.chmod(source_file, sf_stats.st_mode | 0o774)
     # make the symlink executable
     tf_stats = os.stat(target_file)
-    os.chmod(target_file, tf_stats.st_mode | stat.S_IEXEC)
+    os.chmod(target_file, tf_stats.st_mode | 0o774)
+  else:
+    print(f'[!] No link created for {program} at path: {target_file}')
 
 
 def get_release(token: str, url: str, script_os: str):
     repo = urlparse(url).path
-    repo = re.sub('\.git$', '', repo)
+    repo = re.sub('\\.git$', '', repo)
     program = repo.split('/')[-1]
 
     headers = {
@@ -91,21 +114,27 @@ def get_release(token: str, url: str, script_os: str):
     }
 
     response = requests.get(f'https://api.github.com/repos{repo}/releases/latest', headers=headers)
+    
+    target_dir = os.path.join(os.getcwd(), program)
 
     if response.status_code == 200:
       # make dir from file stub and copy file there
-      target_dir = os.path.join(os.getcwd(), program)
       if not os.path.exists(target_dir):
         os.makedirs(target_dir)
-      # download the files to target dir
-      get_files(response, target_dir)
-      # symlink the main .exe to program.exe
-      make_symlink(target_dir, program, script_os)
+        # download the files to target dir
+        get_files(response, target_dir)
+      else:
+        print(f'[ ] Target directory {target_dir} exists, remove the folder if wanting to redownload.')
     else:
       print(f'[!] Unable to get the repo from link: {url}')
       print('[ ] Please check the link exists')
       print(response)
-
+      
+    if os.path.exists(target_dir):
+      # symlink the main .exe to program.exe
+      make_symlink(target_dir, program, script_os)
+    else:
+      print(f'[!] Unable to make symlink. Non-existant target directory: {target_dir}, for {program}')
 
 def main():
     parser = argparse.ArgumentParser()

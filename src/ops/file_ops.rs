@@ -8,15 +8,18 @@ use inquire::CustomType;
 use inquire::InquireError;
 
 use walkdir::WalkDir;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use chrono::NaiveDate;
 use glob::glob;
 
 pub fn make_folders(out_path: &Path) {
-    fs::create_dir_all(out_path).expect("Failed to create folder");
+    // println!("[-] Making dir: {}", out_path.display());
+    fs::create_dir_all(out_path).expect(
+        format!("Failed to create folder {}", out_path.display()).as_str()
+    );
 }
 
-pub(crate) fn line_count(file_path: &String) -> usize {
+pub(crate) fn line_count(file_path: &Path) -> usize {
     let path = Path::new(&file_path);
     if path.exists() && path.is_file() {
         let file = fs::File::open(file_path).unwrap();
@@ -24,7 +27,7 @@ pub(crate) fn line_count(file_path: &String) -> usize {
         let lines_count: usize = reader.lines().count();
         return lines_count;
     } else {
-        let file_path_glob = find_file_glob(&file_path);
+        let file_path_glob = find_file_glob(&file_path.to_str().unwrap().to_string());
         if file_path_glob.len() > 0 {
             let file = fs::File::open(file_path_glob).unwrap();
             let reader = BufReader::new(file);
@@ -35,15 +38,15 @@ pub(crate) fn line_count(file_path: &String) -> usize {
     return 0;
 }
 
-///  file_exists - will check if a file exists and ask the user if they want to
+///  file_exists_overwrite - will check if a file exists and ask the user if they want to
 /// overwrite the file. This function returns false if it exists.
-pub(crate) fn file_exists(file_path: &String, silent: bool) -> bool {
+pub(crate) fn file_exists_overwrite(file_path: &Path, silent: bool) -> bool {
     let mut ret = true;
-    let path = Path::new(&file_path);
-    if path.exists() && path.is_file() {
-        ret = user_file_overwrite(silent, file_path);
+    let path_str = file_path.to_str().unwrap().to_string();
+    if file_path.exists() && file_path.is_file() {
+        ret = user_file_overwrite(silent, &path_str);
     } else {
-        let file_path_glob = find_file_glob(&file_path);
+        let file_path_glob = find_file_glob(&path_str);
         if file_path_glob.len() > 0 {
             ret = user_file_overwrite(silent, &file_path_glob);
         }
@@ -115,15 +118,17 @@ pub fn check_date(date: String, date_type: &String) -> String {
     ret_date
 }
 
-pub fn log_msg(out_log: &String, msg: String) {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .append(true)
-        .open(&out_log)
-        .expect("Failed to open log file");
-    
-    writeln!(file, "[{}] {}", chrono::Local::now().format("%Y%m%dT%H%M%S"), msg).unwrap();
+pub fn log_msg(out_log: &Path, msg: String) {
+    if out_log != Path::new("") {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(true)
+            .open(&out_log)
+            .expect("Failed to open log file");
+        
+        writeln!(file, "[{}] {}", chrono::Local::now().format("%Y%m%dT%H%M%S"), msg).unwrap();
+    }
 }
 
 /// check_access - get attr, try read, regex root to see if match \w:\\Windows\\
@@ -186,4 +191,16 @@ fn has_any_lines(filepath: &String) -> Result<String, io::Error> {
         Err(e) => Err(io::Error::new(io::ErrorKind::Other, format!("[!] Empty file: {filepath}. Error: {e}"))),
         Ok(_) => Ok("this is a file".to_string()),
     }
+}
+
+pub fn check_path(file_path: PathBuf) -> PathBuf {
+    let file_path = if !file_path.exists() && !file_path.is_file() {
+        let path_str = inquire::Text::new(
+            format!("Unable to find file: {}. Please check the path and enter again.", file_path.display()).as_str()
+        ).prompt().unwrap();
+        Path::new(&path_str).to_path_buf()
+    } else {
+        file_path
+    };
+    file_path
 }

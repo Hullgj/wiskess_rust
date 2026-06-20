@@ -3,6 +3,7 @@ pub mod paths {
     use glob::glob;
     use inquire::Text;
     use regex::Regex;
+    use rayon::prelude::*;
     use crate::{configs::config::{self, Artefacts}, ops::{get_files, file_ops::{self, log_msg}}};
 
     pub fn check_art(artefacts: Vec<Artefacts>, data_source: &String, silent: bool, main_args: &config::MainArgs) -> HashMap<String, String> {
@@ -78,50 +79,61 @@ pub mod paths {
     /// * `data_paths` - a hash of the artefact name and filepath of it {name:'pagefile',path:'c:/pagefile.sys'}
     /// * `main_args` - a vector of the main args from main.rs, including the output path
     pub fn check_copy_art(data_paths: HashMap<String, String>, main_args: &config::MainArgs) -> HashMap<String, String> {
-        let mut data_paths_clone = data_paths.to_owned();
-        let base_path = Path::new(&data_paths_clone["base"]);
-        match base_path.parent() {
-            Some(_) => {
-                println!("[DEBUG] This is likely a collection, not collecting.");
-                return data_paths_clone;
-            },
-            None => (),
+        let mut data_paths_clone = match check_collection(&data_paths) {
+            Ok(value) => value,
+            Err(value) => return value,
         };
-        if env::consts::OS == "windows" {
+        
+        if env::consts::OS == "windows" && main_args.collect {
             // set the path where artefacts are copied to
             let dest_path = Path::new(&main_args.out_path).join("Artefacts");
             file_ops::make_folders(&dest_path);
             let dest_path_str = dest_path.clone().into_os_string().into_string().unwrap();
-            // loop through all artefacts
-            for (name, path) in data_paths.iter() {
-                if !check_art_access(&path, &main_args.out_log) {
+            
+            // Collect items that need processing
+            let items_to_process: Vec<(String, String)> = data_paths
+                .iter()
+                .filter(|(_, path)| !check_art_access(path, &main_args.out_log))
+                .map(|(name, path)| (name.clone(), path.clone()))
+                .collect();
+            
+            // Pre-create all necessary directories sequentially
+            for (_, path) in &items_to_process {
+                let base_path = format!("{}\\", &data_paths["base"]);
+                let filename = &path.replace(&base_path, "");
+                let dest_dir = Path::new(&dest_path_str).join(filename);
+                let path_path = Path::new(path);
+                
+                if path_path.is_file() {
+                    file_ops::make_folders(dest_dir.parent().unwrap());
+                } else {
+                    file_ops::make_folders(Path::new(&dest_dir.into_os_string()));
+                }
+            }
+            
+            // Process items in parallel and collect results with log messages
+            let results: Vec<(String, String, String)> = items_to_process
+                .par_iter()
+                .map(|(name, path)| {
                     // set the string for the filesystem, i.e. `\\\\.\\d:`
                     let filesystem = format!("\\\\.\\{}", &data_paths["base"].replace("\\",""));
                     // set the base_path to remove the root drive, i.e. `d:\\` from the filename, i.e. `d:\\pagefile.sys`
                     let base_path = format!("{}\\", &data_paths["base"]);
                     let filename = &path.replace(&base_path, "");
-                    // make dirs of the filename
-                    let dest_dir = Path::new(&dest_path_str).join(filename);
                     let path_path = Path::new(path);
-                    if path_path.is_file() {
-                        file_ops::make_folders(dest_dir.parent().unwrap());
-                    } else {
-                        file_ops::make_folders(Path::new(&dest_dir.into_os_string()));
-                    }
-                    let new_path = match get_files::get_file(&filesystem, &filename, &dest_path_str, path_path.is_file()) {
+                    
+                    let (new_path, log_message) = match get_files::get_file(&filesystem, &filename, &dest_path_str, path_path.is_file()) {
                         Ok(_) => {
                             let msg = format!("[+] Copy done for file: {path}");
-                            log_msg(&main_args.out_log, msg);
-                            // set the new path replace any colon `:` with underscore `_` as get_file() does that to data streams
                             let new_path = Path::new(&dest_path).join(filename.replace(":", "_")).to_str().unwrap().to_string();
-                            new_path
+                            (new_path, msg)
                         }   
                         Err(e) => {
                             // check if the file has already been copied from the datasource
                             let (msg, new_path) = if Regex::new(r"^Tried to open .+ for writing$")
                                 .unwrap()
                                 .is_match(e.to_string().as_str()) {
-                                let msg = format!("[ ] Alerady copied file: {path}. Error: {}\n", e);
+                                let msg = format!("[ ] Already copied file: {path}. Error: {}\n", e);
                                 let new_path = Path::new(&dest_path).join(filename.replace(":", "_")).to_str().unwrap().to_string();
                                 (msg, new_path)
                             } else {
@@ -129,18 +141,43 @@ pub mod paths {
                                 let new_path = path.to_owned();
                                 (msg, new_path)
                             };
-                            log_msg(&main_args.out_log, msg);
-                            new_path
+                            (new_path, msg)
                         }
                     };
-                    data_paths_clone.insert(name.to_owned(), new_path);
-                }
+                    
+                    (name.clone(), new_path, log_message)
+                })
+                .collect();
+            
+            // Process results sequentially 
+            for (name, new_path, log_message) in results {
+                log_msg(&main_args.out_log, log_message);
+                data_paths_clone.insert(name, new_path);
             }
         }
         data_paths_clone    
     }
 
-    fn check_art_access(filepath: &String, out_log: &String) -> bool {
+    /// check if the collection has a base path that is the root
+    /// serves as a good way to check if the data source is a collection or a mounted drive
+    /// 
+    /// Args:
+    /// * `data_paths` - hash of the paths in form: pagefile: C:\pagefile.sys
+    /// 
+    /// returns the datapaths as Ok if a mounted drive, otherwise as Err if a collection
+    pub fn check_collection(data_paths: &HashMap<String, String>) -> Result<HashMap<String, String>, HashMap<String, String>> {
+        let data_paths_clone = data_paths.to_owned();
+        let base_path = Path::new(&data_paths_clone["base"]);
+        match base_path.parent() {
+            Some(_) => {
+                return Err(data_paths_clone);
+            },
+            None => (),
+        };
+        Ok(data_paths_clone)
+    }
+    
+    fn check_art_access(filepath: &String, out_log: &Path) -> bool {
         match file_ops::check_access(&filepath) {
             Ok(_message) => {
                 // println!("{message}");
@@ -187,7 +224,14 @@ pub mod paths {
                 path_arg.display().to_string()
             );
         } else {
-            if is_glob_path(path_str) {
+            // On Linux paths are case-sensitive; try a case-insensitive lookup
+            // by listing the parent directory and matching on lowercased names
+            if let Some(resolved) = find_case_insensitive(path_arg) {
+                art_paths.insert(
+                    art_name.to_string(),
+                    resolved.display().to_string()
+                );
+            } else if is_glob_path(path_str) {
                 // add path to hash
                 art_paths.insert(
                     art_name.to_string(),
@@ -195,6 +239,23 @@ pub mod paths {
                 );
             }
         }
+    }
+
+    /// Resolve a path case-insensitively by listing the parent directory,
+    /// lowercasing both the target filename and each entry name, and returning
+    /// the actual filesystem path when they match.
+    pub fn find_case_insensitive(path: &Path) -> Option<std::path::PathBuf> {
+        let parent = path.parent()?;
+        let target = path.file_name()?.to_string_lossy().to_lowercase();
+
+        std::fs::read_dir(parent).ok()?.flatten().find_map(|entry| {
+            let entry_name = entry.file_name();
+            if entry_name.to_string_lossy().to_lowercase() == target {
+                Some(entry.path())
+            } else {
+                None
+            }
+        })
     }
 
     fn is_glob_path(path_str: &String) -> bool {
